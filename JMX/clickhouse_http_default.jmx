@@ -1,0 +1,381 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">
+  <hashTree>
+    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="ClickHouse HTTP - default">
+      <boolProp name="TestPlan.functional_mode">false</boolProp>
+      <boolProp name="TestPlan.serialize_threadgroups">false</boolProp>
+      <elementProp name="TestPlan.user_defined_variables" elementType="Arguments" guiclass="ArgumentsPanel" testclass="Arguments" testname="User Defined Variables">
+        <collectionProp name="Arguments.arguments">
+          <elementProp name="BATCH_FILE" elementType="Argument">
+            <stringProp name="Argument.name">BATCH_FILE</stringProp>
+            <stringProp name="Argument.value">${__P(BATCH_FILE,${__env(HOME)}/jmeter-tests/source_ips.tsv)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="BATCH_LIMIT" elementType="Argument">
+            <stringProp name="Argument.name">BATCH_LIMIT</stringProp>
+            <stringProp name="Argument.value">${__P(BATCH_LIMIT,5)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="BATCH_DIR" elementType="Argument">
+            <stringProp name="Argument.name">BATCH_DIR</stringProp>
+            <stringProp name="Argument.value">${__P(BATCH_DIR,${__env(HOME)}/jmeter-tests/ip_batches)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="BATCH_GLOB" elementType="Argument">
+            <stringProp name="Argument.name">BATCH_GLOB</stringProp>
+            <stringProp name="Argument.value">${__P(BATCH_GLOB,ips_batch_*.csv)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+        </collectionProp>
+      </elementProp>
+    </TestPlan>
+    <hashTree>
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="CH HTTP Smoke TG">
+        <stringProp name="ThreadGroup.num_threads">${__P(THREADS,10)}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">${__P(RAMP,1)}</stringProp>
+        <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
+        <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller">
+          <stringProp name="LoopController.loops">${__P(LOOPS,1)}</stringProp>
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+        </elementProp>
+      </ThreadGroup>
+      <hashTree>
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="ClickHouse SQL via HTTP" enabled="true">
+          <stringProp name="HTTPSampler.domain">fraudlogix-dev-poc.coalition.sdm.network</stringProp>
+          <stringProp name="HTTPSampler.port">8123</stringProp>
+          <stringProp name="HTTPSampler.protocol">https</stringProp>
+          <stringProp name="HTTPSampler.path">/?database=default&amp;default_format=JSON</stringProp>
+          <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+          <stringProp name="HTTPSampler.method">POST</stringProp>
+          <boolProp name="HTTPSampler.use_keepalive">false</boolProp>
+          <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+          <boolProp name="HTTPSampler.accept_all">true</boolProp>
+          <boolProp name="HTTPSampler.use_insecure">true</boolProp>
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+            <collectionProp name="Arguments.arguments">
+              <elementProp name="" elementType="HTTPArgument">
+                <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                <stringProp name="Argument.value">${SQL_BODY}</stringProp>
+                <stringProp name="Argument.metadata">=</stringProp>
+              </elementProp>
+            </collectionProp>
+          </elementProp>
+          <stringProp name="HTTPSampler.implementation">Java</stringProp>
+        </HTTPSamplerProxy>
+        <hashTree>
+          <JSR223PreProcessor guiclass="TestBeanGUI" testclass="JSR223PreProcessor" testname="Load next batch and build IPS_IN" enabled="true">
+            <stringProp name="scriptLanguage">groovy</stringProp>
+            <stringProp name="parameters"></stringProp>
+            <stringProp name="filename"></stringProp>
+            <stringProp name="cacheKey"></stringProp>
+            <stringProp name="script"><![CDATA[
+// Determine batch size per iteration
+int limit = (props.get('BATCH_LIMIT') ? (props.get('BATCH_LIMIT') as int) : (vars.get('BATCH_LIMIT') ? (vars.get('BATCH_LIMIT') as int) : 5))
+
+// Prefer explicit TSV file if provided; else fall back to dir/glob batches
+def tsv = props.get('BATCH_FILE') ?: vars.get('BATCH_FILE')
+String path = null
+List ipsChunk = []
+
+if (tsv) {
+  path = tsv
+  // Cache parsed TSV IP list across iterations (per-thread via vars)
+  def cached = vars.getObject('TSV_LINES')
+  List allIps
+  if (cached == null) {
+    def raw = new File(path).readLines('UTF-8')
+    allIps = []
+    for (def line : raw) {
+      if (!line) continue
+      def s = line.toString().trim()
+      if (!s) continue
+      if (s.toLowerCase().startsWith('ip') || s.contains(',ip') || s.startsWith('ip\t')) continue
+      def parts = s.split('\t')
+      def val = (parts.length >= 2 ? parts[1] : parts[0]).trim()
+      if (!val) continue
+      if (val.contains('*') || val.toUpperCase().contains('XX')) continue
+      allIps.add(val)
+    }
+    vars.putObject('TSV_LINES', allIps)
+    vars.put('TSV_TOTAL', String.valueOf(allIps.size()))
+  } else {
+    allIps = (List) cached
+  }
+  int total = (vars.get('TSV_TOTAL') ?: String.valueOf(((List)vars.getObject('TSV_LINES')).size())) as int
+  int offset = (vars.get('TSV_OFFSET') ?: '0') as int
+  if (offset >= total) {
+    // wrap to start if loops exceed exact batch count
+    offset = 0
+  }
+  int end = Math.min(offset + limit, total)
+  ipsChunk = ((List)vars.getObject('TSV_LINES')).subList(offset, end)
+  vars.put('TSV_OFFSET', String.valueOf(end))
+  log.info('Using TSV source file: ' + path + ' offset=' + offset + ' size=' + ipsChunk.size() + '/' + total)
+} else {
+  def dir = props.get('BATCH_DIR') ?: vars.get('BATCH_DIR')
+  if (!dir) { dir = System.getenv('HOME') + '/jmeter-tests/ip_batches' }
+  def glob = props.get('BATCH_GLOB') ?: vars.get('BATCH_GLOB') ?: 'ips_batch_*.csv'
+  def list = vars.getObject('BATCH_LIST')
+  if (list == null) {
+    def d = new File(dir)
+    if (!d.exists()) { throw new RuntimeException('BATCH_DIR not found: ' + dir) }
+    def regex = ('^' + glob.replace('.', '\\.').replace('*','.*') + '$')
+    list = d.listFiles()?.findAll { it.name ==~ regex }?.collect { it.absolutePath }?.sort()
+    if (!list || list.isEmpty()) { throw new RuntimeException('No batch files in ' + dir + ' matching ' + glob) }
+    vars.putObject('BATCH_LIST', list)
+    vars.put('BATCH_SIZE', String.valueOf(list.size()))
+  }
+  int idx = (vars.get('BATCH_INDEX') ?: '0') as int
+  def blist = (List)vars.getObject('BATCH_LIST')
+  if (idx >= blist.size()) {
+    log.info('All batches consumed (' + blist.size() + '). Restarting at index 0.')
+    idx = 0
+  }
+  path = blist[idx]
+  vars.put('BATCH_INDEX', String.valueOf(idx + 1))
+  log.info('Using batch file [' + (idx+1) + '/' + blist.size() + ']: ' + path)
+  // read up to limit from CSV (skip header if present)
+  def lines = new File(path).readLines('UTF-8')
+  def body = (lines && lines[0].toLowerCase().contains('ip')) ? lines.subList(1, lines.size()) : lines
+  ipsChunk = body.take(limit)
+}
+
+// Quote values for IN (...)
+def ips = ipsChunk.collect { "'" + it.replace('\\', '\\\\').replace("'", "\\'") + "'" }
+vars.put('IPS_IN', ips.join(', '))
+
+// Build full SQL body and store for the sampler and logging
+def sql = new StringBuilder()
+sql.append('SELECT\n')
+sql.append('*\n')
+sql.append('FROM default.fraudlogix\n')
+sql.append('WHERE IP IN (\n')
+sql.append(ips.join(', ')).append('\n')
+sql.append(')\n')
+sql.append('FORMAT JSON')
+vars.put('SQL_BODY', sql.toString())
+log.info('Built IPS_IN with ' + ips.size() + ' values from ' + (path ?: '<N/A>') + '; SQL length=' + vars.get('SQL_BODY').length())
+]]></stringProp>
+          </JSR223PreProcessor>
+          <hashTree/>
+          <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="Log SQL" enabled="false">
+            <stringProp name="scriptLanguage">groovy</stringProp>
+            <stringProp name="parameters"></stringProp>
+            <stringProp name="filename"></stringProp>
+            <stringProp name="cacheKey"></stringProp>
+            <stringProp name="script"><![CDATA[
+def code = (prev.getResponseCode() as String) ?: 'n/a'
+def sql  = vars.get('SQL_BODY') ?: '<missing SQL_BODY>'
+if (code.startsWith('2')) {
+  log.info('SQL (' + code + '):\n' + sql)
+} else {
+  log.warn('SQL (' + code + '):\n' + sql)
+}
+]]></stringProp>
+          </JSR223PostProcessor>
+          <hashTree/>
+          <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="HTTP Headers" enabled="true">
+            <collectionProp name="HeaderManager.headers">
+              <elementProp name="" elementType="Header">
+                <stringProp name="Header.name">Content-Type</stringProp>
+                <stringProp name="Header.value">text/plain; charset=utf-8</stringProp>
+              </elementProp>
+              <elementProp name="" elementType="Header">
+                <stringProp name="Header.name">Connection</stringProp>
+                <stringProp name="Header.value">close</stringProp>
+              </elementProp>
+            </collectionProp>
+          </HeaderManager>
+          <hashTree/>
+          <JSR223Listener guiclass="TestBeanGUI" testclass="JSR223Listener" testname="Collect metrics (elapsed ms)" enabled="false">
+            <stringProp name="scriptLanguage">groovy</stringProp>
+            <stringProp name="parameters"></stringProp>
+            <stringProp name="filename"></stringProp>
+            <stringProp name="cacheKey"></stringProp>
+            <stringProp name="script"><![CDATA[
+// Append elapsed time (ms) to a file for cross-thread visibility
+def outDir = new File(System.getenv('HOME') + '/jmeter-tests')
+outDir.mkdirs()
+def f = new File(outDir, 'elapsed_times.csv')
+f << (prev.getTime() as long).toString() + System.lineSeparator()
+]]></stringProp>
+          </JSR223Listener>
+          <hashTree/>
+          <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="Assert HTTP 200" enabled="true">
+            <collectionProp name="Asserion.test_strings">
+              <stringProp name="49586">200</stringProp>
+            </collectionProp>
+            <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+            <boolProp name="Assertion.assume_success">false</boolProp>
+            <intProp name="Assertion.test_type">8</intProp>
+            <stringProp name="Assertion.custom_message"></stringProp>
+          </ResponseAssertion>
+          <hashTree/>
+          <JSR223Assertion guiclass="TestBeanGUI" testclass="JSR223Assertion" testname="Assert rows>0 and contains IP meta (lightweight)" enabled="true">
+            <stringProp name="scriptLanguage">groovy</stringProp>
+            <stringProp name="parameters"></stringProp>
+            <stringProp name="filename"></stringProp>
+            <stringProp name="cacheKey"></stringProp>
+            <stringProp name="script"><![CDATA[
+def body = prev.getResponseDataAsString()
+assert body, 'Empty response body'
+assert body.contains('"meta"'), 'Missing meta section'
+def m = (body =~ /\"rows\"\s*:\s*(\d+)/)
+assert m.find(), 'rows field missing'
+assert (m.group(1) as int) >= 1, 'rows < 1'
+]]></stringProp>
+          </JSR223Assertion>
+          <hashTree/>
+          <ResultSaver guiclass="ResultSaverGui" testclass="ResultSaver" testname="Save Responses to File" enabled="false">
+            <stringProp name="FileSaver.filename">/Users/muthu.vairam/jmeter-tests/http_bodies/resp-</stringProp>
+            <boolProp name="FileSaver.errorsOnly">false</boolProp>
+            <boolProp name="FileSaver.successOnly">true</boolProp>
+            <boolProp name="FileSaver.skipAutoNumber">false</boolProp>
+            <boolProp name="FileSaver.skipSuffix">false</boolProp>
+            <boolProp name="FileSaver.addTimestamp">false</boolProp>
+            <stringProp name="FileSaver.variableName"></stringProp>
+          </ResultSaver>
+          <hashTree/>
+          <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="Log first 500 chars of body" enabled="false">
+            <stringProp name="scriptLanguage">groovy</stringProp>
+            <stringProp name="parameters"></stringProp>
+            <stringProp name="filename"></stringProp>
+            <stringProp name="cacheKey"></stringProp>
+            <stringProp name="script"><![CDATA[
+def body = prev.getResponseDataAsString();
+if (body != null) {
+  def head = body.substring(0, Math.min(500, body.length()));
+  log.info('HTTP body head: ' + head);
+}
+]]></stringProp>
+          </JSR223PostProcessor>
+          <hashTree/>
+          <ResultCollector guiclass="ViewResultsFullVisualizer" testclass="ResultCollector" testname="View Results Tree" enabled="false">
+            <boolProp name="ResultCollector.error_logging">false</boolProp>
+            <objProp>
+              <name>saveConfig</name>
+              <value class="SampleSaveConfiguration">
+                <time>true</time>
+                <latency>true</latency>
+                <timestamp>true</timestamp>
+                <success>true</success>
+                <label>true</label>
+                <code>true</code>
+                <message>true</message>
+                <threadName>true</threadName>
+                <dataType>true</dataType>
+                <encoding>false</encoding>
+                <assertions>true</assertions>
+                <subresults>true</subresults>
+                <responseData>false</responseData>
+                <samplerData>false</samplerData>
+                <xml>false</xml>
+                <fieldNames>true</fieldNames>
+                <responseHeaders>false</responseHeaders>
+                <requestHeaders>false</requestHeaders>
+                <responseDataOnError>false</responseDataOnError>
+                <saveAssertionResultsFailureMessage>true</saveAssertionResultsFailureMessage>
+                <assertionsResultsToSave>0</assertionsResultsToSave>
+                <bytes>true</bytes>
+                <sentBytes>true</sentBytes>
+                <url>true</url>
+                <threadCounts>true</threadCounts>
+                <idleTime>true</idleTime>
+                <connectTime>true</connectTime>
+              </value>
+            </objProp>
+            <stringProp name="filename"></stringProp>
+          </ResultCollector>
+          <hashTree/>
+          <ResultCollector guiclass="SummaryReport" testclass="ResultCollector" testname="Summary Report" enabled="true">
+            <boolProp name="ResultCollector.error_logging">false</boolProp>
+            <objProp>
+              <name>saveConfig</name>
+              <value class="SampleSaveConfiguration">
+                <time>true</time>
+                <latency>true</latency>
+                <timestamp>true</timestamp>
+                <success>true</success>
+                <label>true</label>
+                <code>true</code>
+                <message>true</message>
+                <threadName>true</threadName>
+                <dataType>true</dataType>
+                <encoding>false</encoding>
+                <assertions>true</assertions>
+                <subresults>true</subresults>
+                <responseData>false</responseData>
+                <samplerData>false</samplerData>
+                <xml>false</xml>
+                <fieldNames>true</fieldNames>
+                <responseHeaders>false</responseHeaders>
+                <requestHeaders>false</requestHeaders>
+                <responseDataOnError>false</responseDataOnError>
+                <saveAssertionResultsFailureMessage>true</saveAssertionResultsFailureMessage>
+                <assertionsResultsToSave>0</assertionsResultsToSave>
+                <bytes>true</bytes>
+                <sentBytes>true</sentBytes>
+                <url>true</url>
+                <threadCounts>true</threadCounts>
+                <idleTime>true</idleTime>
+                <connectTime>true</connectTime>
+              </value>
+            </objProp>
+            <stringProp name="filename"></stringProp>
+          </ResultCollector>
+          <hashTree/>
+        </hashTree>
+      </hashTree>
+    </hashTree>
+  </hashTree>
+  <hashTree>
+    <PostThreadGroup guiclass="PostThreadGroupGui" testclass="PostThreadGroup" testname="TearDown Emit Metrics" enabled="false">
+      <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+      <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller">
+        <boolProp name="LoopController.continue_forever">false</boolProp>
+        <stringProp name="LoopController.loops">1</stringProp>
+      </elementProp>
+      <intProp name="ThreadGroup.num_threads">1</intProp>
+      <intProp name="ThreadGroup.ramp_time">1</intProp>
+      <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
+    </PostThreadGroup>
+    <hashTree>
+      <JSR223Sampler guiclass="TestBeanGUI" testclass="JSR223Sampler" testname="Compute and log avg/p95/p99" enabled="true">
+        <stringProp name="scriptLanguage">groovy</stringProp>
+        <stringProp name="parameters"></stringProp>
+        <stringProp name="filename"></stringProp>
+        <stringProp name="cacheKey"></stringProp>
+        <stringProp name="script"><![CDATA[
+// Read elapsed times from file and compute avg/p95/p99
+def outDir = new File(System.getenv('HOME') + '/jmeter-tests')
+def f = new File(outDir, 'elapsed_times.csv')
+if (!f.exists()) {
+  log.warn('METRICS: elapsed_times.csv not found; no samples?')
+  return
+}
+def times = f.readLines().findAll { it?.trim() }.collect { it as long }
+if (times.isEmpty()) {
+  log.warn('METRICS: no samples collected')
+  return
+}
+def n = times.size()
+long sum = 0L
+for (t in times) sum += t
+def avg = sum / (double)n
+def sorted = new java.util.ArrayList<Long>(times)
+java.util.Collections.sort(sorted)
+int idx95 = Math.max(0, (int)Math.ceil(0.95d * n) - 1)
+int idx99 = Math.max(0, (int)Math.ceil(0.99d * n) - 1)
+def p95 = sorted.get(idx95)
+def p99 = sorted.get(idx99)
+log.info(String.format('METRICS summary: count=%d avg=%.2fms p95=%dms p99=%dms', n, avg, p95, p99))
+def jf = new File(outDir, 'metrics_summary.json')
+def json = String.format('{"count":%d,"avg_ms":%.2f,"p95_ms":%d,"p99_ms":%d}', n, avg, p95, p99)
+jf.setText(json, 'UTF-8')
+]]></stringProp>
+      </JSR223Sampler>
+      <hashTree/>
+    </hashTree>
+  </hashTree>
+</jmeterTestPlan>
